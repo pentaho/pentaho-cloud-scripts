@@ -1,0 +1,450 @@
+#!/bin/bash
+# Runs as root.
+
+# begin setup ==========================================================================================================
+
+# output every command executed; exit on first command that does not succeed
+set -e -x
+
+logger="logger -t pentaho-init"
+
+sudo="sudo -u pentaho -H"
+
+# curl command
+curl="curl --retry 3 --silent --show-error --fail"
+
+curlfile="${curl} --output"
+
+${logger} "begin"
+
+dir_orig=$(pwd)
+${logger} "current working directory is ${dir_orig}"
+dir_rel=$(dirname ${0})
+cd ${dir_rel}
+dir_abs=$(pwd)
+${logger} "script directory is ${dir_abs}"
+cd ~
+user_home=$(pwd)
+${logger} "user home directory is ${user_home}"
+cd ${dir_orig}
+
+work="/tmp/pentaho-init-tmp"
+
+${logger} "creating work directory"
+
+mkdir ${work}
+
+util=${dir_abs}/util.py
+
+# source the vars script
+. ${dir_abs}/vars
+
+prepare_root_device=1
+if dpkg-query -W mysql-server; then
+  prepare_root_device=0
+fi
+
+# end setup ============================================================================================================
+
+# begin metadata =======================================================================================================
+
+if [ "${provider}" = "amazon" ]; then
+
+  ${logger} "provider is amazon"
+
+  ${logger} "getting public hostname"
+
+  instance_data_url=http://169.254.169.254/latest
+  public_hostname=$(${curl} ${instance_data_url}/meta-data/public-hostname)
+  ${logger} "public hostname ${public_hostname}"
+  ami_launch_index=$(${curl} ${instance_data_url}/meta-data/ami-launch-index)
+  ${logger} "ami launch index _${ami_launch_index}_"
+
+  local_ip=$(${curl} ${instance_data_url}/meta-data/local-ipv4)
+  ${logger} "local ip ${local_ip}"
+
+  # remove access to the ec2 metadata service; null route can be removed (by root) with:
+  #   route del -host 169.254.169.254 reject
+
+  ${logger} "shutting off metadata"
+  route add -host 169.254.169.254 reject
+
+elif [ "${provider}" = "rackspace" ]; then
+
+  ${logger} "provider is rackspace"
+
+  ${logger} "getting public ip"
+
+  public_ip=$(ip addr list eth0 | grep inet | grep -v inet6 | awk '{print $2}' | awk 'BEGIN {FS="/";} {print $1}')
+  public_hostname=${public_ip}
+  local_ip=${public_ip}
+  ${logger} "public ip ${public_ip}"
+  
+  if [ ${prepare_root_device} -eq 1 ]; then
+    # cloud-init default local hostname is 'ubuntuhost' but it does not add it to /etc/hosts
+    echo -e "\n${public_ip} ubuntuhost" >> /etc/hosts  
+  else
+    sed -e "s|^.*ubuntuhost|${public_ip} ubuntuhost|" -e "s|8443|18443|" /etc/hosts > /etc/hosts1
+    mv /etc/hosts1 /etc/hosts
+  fi
+
+  ami_launch_index=0
+  
+fi
+
+instance_password=${passwords[${ami_launch_index}]}
+  
+# end metadata =========================================================================================================
+
+# begin packages========================================================================================================
+
+if [ ${prepare_root_device} -eq 1 ]; then
+
+  # for unattended apt-get installs
+	export DEBIAN_FRONTEND=noninteractive
+	
+  # necessary for sun-java6-jdk
+	add-apt-repository "deb http://archive.canonical.com/ lucid partner"
+	
+  ${logger} "updating apt"
+	
+  # update the local package index and update versions of packages currently installed
+	apt-get update 
+  # && apt-get upgrade -y
+	
+  ${logger} "installing debconf-utils"
+	
+  # used for unattended installs
+	apt-get -y install debconf-utils
+	
+  ${logger} "installing unzip"
+	
+  # will need this later
+	apt-get -y install unzip
+	
+  ${logger} "installing MySQL"
+	
+  # answer prompts ahead of time
+	echo "mysql-server mysql-server/root_password select ${instance_password}" | debconf-set-selections
+	echo "mysql-server mysql-server/root_password_again select ${instance_password}" | debconf-set-selections
+	
+  # install MySQL
+	apt-get -y install mysql-server
+	
+  # answer the SUN license prompts ahead of time
+	echo "sun-java6-jdk shared/accepted-sun-dlj-v1-1 boolean true" | debconf-set-selections
+	
+  ${logger} "installing Java"
+	
+  # install Sun JDK 6
+	apt-get -y install sun-java6-jdk
+	
+	java_home=/usr/lib/jvm/java-6-sun
+	
+  ${logger} "installing python xml libs"
+	
+  # begin python xml
+	apt-get -y install python-setuptools
+	apt-get -y install libxml2-dev
+	apt-get -y install libxslt1-dev
+	apt-get -y install python-dev
+	easy_install --allow-hosts=lxml.de,*.python.org lxml
+  # end python xml
+	
+  # install Pentaho packages
+	
+	pkg_url="changeme"
+	
+  ${logger} "downloading Pentaho DI Server"
+  ${curlfile} ${work}/${diserver_deb} ${pkg_url}${diserver_deb}
+  ${logger} "downloading Pentaho BI Server"
+  ${curlfile} ${work}/${biserver_deb} ${pkg_url}${biserver_deb}
+  ${logger} "downloading PEC"
+  ${curlfile} ${work}/${pec_deb} ${pkg_url}${pec_deb}
+  ${logger} "downloading Pentaho Dashboard Designer plugin"
+  ${curlfile} ${work}/${pdd_deb} ${pkg_url}${pdd_deb}
+  ${logger} "downloading Pentaho Analyzer plugin"
+  ${curlfile} ${work}/${paz_deb} ${pkg_url}${paz_deb}
+  ${logger} "downloading Pentaho Interactive Reporting plugin"
+  ${curlfile} ${work}/${pir_deb} ${pkg_url}${pir_deb}
+	
+  ${logger} "installing Pentaho DI Server"
+	dpkg -i ${work}/${diserver_deb}
+  ${logger} "installing Pentaho BI Server"
+	dpkg -i ${work}/${biserver_deb}
+  ${logger} "installing PEC"
+	dpkg -i ${work}/${pec_deb}
+  ${logger} "installing Pentaho Dashboard Designer plugin"
+	dpkg -i ${work}/${pdd_deb}
+  ${logger} "installing Pentaho Analyzer plugin"
+	dpkg -i ${work}/${paz_deb}
+  ${logger} "installing Pentaho Interactive Reporting plugin"
+	dpkg -i ${work}/${pir_deb}
+	
+fi
+
+# end packages==========================================================================================================
+
+# deb automatically starts the services; stop services while we configure them;
+# also, reboot will have started these;
+
+# stop scripts are buggy; use killall until they're better
+killall java
+
+sleep 10
+
+# as a precaution
+set +e
+killall -9 -q java
+set -e
+
+# begin pentaho ========================================================================================================
+
+if [ ${prepare_root_device} -eq 1 ]; then
+
+  # EVERY TIME 1. create cert
+  # ONCE 2. configure tomcat to use cert
+  # EVERY TIME 3. make pec trust cert
+  # EVERY TIME 3a. set base-url
+  # ONCE 4. optionally setup jetty for ssl
+  # ONCE (EVER) 5. open ssl port in EC2 security config
+    
+  ${logger} "changing ports"
+  
+  # HTTP and HTTPS ports
+  sed -e "s|8080|18080|" -e "s|8443|18443|" /opt/pentaho/pentaho-biserver-ee/tomcat/conf/server.xml > /opt/pentaho/pentaho-biserver-ee/tomcat/conf/server.xml1
+  mv /opt/pentaho/pentaho-biserver-ee/tomcat/conf/server.xml1 /opt/pentaho/pentaho-biserver-ee/tomcat/conf/server.xml
+  # HTTP and HTTPS ports
+  sed -e "s|8088|18088|" -e "s|8033|18033|" -e "s|8143|18143|" /opt/pentaho/pentaho-enterprise-console/resource/config/console.properties > /opt/pentaho/pentaho-enterprise-console/resource/config/console.properties1
+  mv /opt/pentaho/pentaho-enterprise-console/resource/config/console.properties1 /opt/pentaho/pentaho-enterprise-console/resource/config/console.properties
+  # HTTP and HTTPS ports
+  sed -e "s|9080|19080|" -e "s|9443|19443|" /opt/pentaho/pentaho-diserver-ee/tomcat/conf/server.xml > /opt/pentaho/pentaho-diserver-ee/tomcat/conf/server.xml1
+  mv /opt/pentaho/pentaho-diserver-ee/tomcat/conf/server.xml1 /opt/pentaho/pentaho-diserver-ee/tomcat/conf/server.xml
+  
+  if [ ${ssl} -eq 1 ]; then
+    ${logger} "enabling SSL"
+
+    # custom util to mod server.xml to enable SSL; only done once since hostname change doesn't matter
+    ${util} -s /opt/pentaho/pentaho-biserver-ee/tomcat/conf/server.xml 18443
+    ${util} -s /opt/pentaho/pentaho-diserver-ee/tomcat/conf/server.xml 19443
+
+    sed -e "s|console.ssl.enabled=false|console.ssl.enabled=true|" -e "s|keyAlias=jetty|keyAlias=tomcat|" -e "s|keyStore=resource/config/keystore|keyStore=/opt/pentaho/.keystore|" -e "s|trustStore=resource/config/keystore|trustStore=${java_home}/jre/lib/security/cacerts|" /opt/pentaho/pentaho-enterprise-console/resource/config/console.properties > /opt/pentaho/pentaho-enterprise-console/resource/config/console.properties1
+    mv /opt/pentaho/pentaho-enterprise-console/resource/config/console.properties1 /opt/pentaho/pentaho-enterprise-console/resource/config/console.properties
+    
+  fi
+
+  ${logger} "setting publish password"
+
+  # set publish password
+  sed -e 's|<publisher-password></publisher-password>|<publisher-password>'"${instance_password}"'</publisher-password>|' /opt/pentaho/pentaho-biserver-ee/pentaho-solutions/system/publisher_config.xml > /opt/pentaho/pentaho-biserver-ee/pentaho-solutions/system/publisher_config.xml1
+  mv /opt/pentaho/pentaho-biserver-ee/pentaho-solutions/system/publisher_config.xml1 /opt/pentaho/pentaho-biserver-ee/pentaho-solutions/system/publisher_config.xml
+
+  # not sure if DIS needs to be set (can't hurt)
+  sed -e 's|<publisher-password></publisher-password>|<publisher-password>'"${instance_password}"'</publisher-password>|' /opt/pentaho/pentaho-diserver-ee/pentaho-solutions/system/publisher_config.xml > /opt/pentaho/pentaho-diserver-ee/pentaho-solutions/system/publisher_config.xml1
+  mv /opt/pentaho/pentaho-diserver-ee/pentaho-solutions/system/publisher_config.xml1 /opt/pentaho/pentaho-diserver-ee/pentaho-solutions/system/publisher_config.xml
+
+  ${logger} "setting PEC admin password"
+
+  # set PEC admin password; for simplicity, no obfuscation or hashing is done to the password
+  sed -e "s|OBF:1v2j1uum1xtv1zej1zer1xtn1uvk1v1v|${instance_password}|" /opt/pentaho/pentaho-enterprise-console/resource/config/login.properties > /opt/pentaho/pentaho-enterprise-console/resource/config/login.properties1
+  mv /opt/pentaho/pentaho-enterprise-console/resource/config/login.properties1 /opt/pentaho/pentaho-enterprise-console/resource/config/login.properties
+  
+  ${logger} "setting password encoder"
+  
+  # set password encoder to PlaintextPasswordEncoder since base64 encoding done by platform and base64 on command line
+  #   don't match
+  sed -e "s|org.pentaho.platform.engine.security.DefaultPentahoPasswordEncoder|org.springframework.security.providers.encoding.PlaintextPasswordEncoder|" /opt/pentaho/pentaho-biserver-ee/pentaho-solutions/system/applicationContext-spring-security-hibernate.xml > /opt/pentaho/pentaho-biserver-ee/pentaho-solutions/system/applicationContext-spring-security-hibernate.xml1
+  mv /opt/pentaho/pentaho-biserver-ee/pentaho-solutions/system/applicationContext-spring-security-hibernate.xml1 /opt/pentaho/pentaho-biserver-ee/pentaho-solutions/system/applicationContext-spring-security-hibernate.xml
+
+  sed -e "s|org.pentaho.platform.engine.security.DefaultPentahoPasswordEncoder|org.springframework.security.providers.encoding.PlaintextPasswordEncoder|" /opt/pentaho/pentaho-diserver-ee/pentaho-solutions/system/applicationContext-spring-security-hibernate.xml > /opt/pentaho/pentaho-diserver-ee/pentaho-solutions/system/applicationContext-spring-security-hibernate.xml1
+  mv /opt/pentaho/pentaho-diserver-ee/pentaho-solutions/system/applicationContext-spring-security-hibernate.xml1 /opt/pentaho/pentaho-diserver-ee/pentaho-solutions/system/applicationContext-spring-security-hibernate.xml
+
+fi
+
+# always set fully-qualified-server-url (because the hostname is different) and install licenses (because this allows us
+#   to drop new licenses into the bucket and have them installed automatically)
+
+${logger} "setting fully-qualified-server-url"
+
+if [ ${ssl} -eq 1 ]; then
+  fully_qualified_server_url_bi="https://${public_hostname}:18443/pentaho/"
+  fully_qualified_server_url_di="https://${public_hostname}:19443/pentaho-di/"
+else
+  fully_qualified_server_url_bi="http://${public_hostname}:18080/pentaho/"
+  fully_qualified_server_url_di="http://${public_hostname}:19080/pentaho-di/"
+fi
+
+sed -e 's|http://.*8080/pentaho/|'"${fully_qualified_server_url_bi}"'|' /opt/pentaho/pentaho-biserver-ee/tomcat/webapps/pentaho/WEB-INF/web.xml > /opt/pentaho/pentaho-biserver-ee/tomcat/webapps/pentaho/WEB-INF/web.xml1
+mv /opt/pentaho/pentaho-biserver-ee/tomcat/webapps/pentaho/WEB-INF/web.xml1 /opt/pentaho/pentaho-biserver-ee/tomcat/webapps/pentaho/WEB-INF/web.xml
+
+# proxy trusting filter (so that PEC can authenticate)
+sed -e 's|127\.0\.0\.1.*<|'"127.0.0.1,${local_ip}"'<|' /opt/pentaho/pentaho-biserver-ee/tomcat/webapps/pentaho/WEB-INF/web.xml > /opt/pentaho/pentaho-biserver-ee/tomcat/webapps/pentaho/WEB-INF/web.xml1
+mv /opt/pentaho/pentaho-biserver-ee/tomcat/webapps/pentaho/WEB-INF/web.xml1 /opt/pentaho/pentaho-biserver-ee/tomcat/webapps/pentaho/WEB-INF/web.xml
+
+sed -e 's|http://.*9080/pentaho-di/|'"${fully_qualified_server_url_di}"'|' /opt/pentaho/pentaho-diserver-ee/tomcat/webapps/pentaho-di/WEB-INF/web.xml > /opt/pentaho/pentaho-diserver-ee/tomcat/webapps/pentaho-di/WEB-INF/web.xml1
+mv /opt/pentaho/pentaho-diserver-ee/tomcat/webapps/pentaho-di/WEB-INF/web.xml1 /opt/pentaho/pentaho-diserver-ee/tomcat/webapps/pentaho-di/WEB-INF/web.xml
+
+if [ ${prepare_root_device} -eq 1 ]; then
+
+  ${logger} "installing Pentaho licenses"
+
+  # for rackspace, we inject pentaho-licenses.tar.gz into /opt/pentaho; (injecting into /var/lib/cloud/instance/scripts didn't work)
+  if [ "${provider}" = "rackspace" ]; then
+    tar --directory ${work} -xzf /opt/pentaho/pentaho-licenses.tar.gz
+  else
+    tar --directory ${work} -xzf ${dir_abs}/pentaho-licenses.tar.gz
+  fi
+
+  # use sudo to make sure licenses get put in home dir of pentaho user (since the servers are run as pentaho)
+  # install licenses (path to install_license.sh is diff because of PPP-2531)
+  ${sudo} /opt/pentaho/pentaho-enterprise-console/license-installer/install_license.sh install ${work}/Pentaho\ Dashboard\ Designer.lic -q
+  ${sudo} /opt/pentaho/pentaho-enterprise-console/license-installer/install_license.sh install ${work}/Pentaho\ PDI\ Enterprise\ Edition.lic -q
+  ${sudo} /opt/pentaho/pentaho-enterprise-console/license-installer/install_license.sh install ${work}/Pentaho\ Analysis\ Enterprise\ Edition.lic -q
+  ${sudo} /opt/pentaho/pentaho-enterprise-console/license-installer/install_license.sh install ${work}/Pentaho\ BI\ Platform\ Enterprise\ Edition.lic -q
+  ${sudo} /opt/pentaho/pentaho-enterprise-console/license-installer/install_license.sh install ${work}/Pentaho\ Hadoop\ Enterprise\ Edition.lic -q
+  ${sudo} /opt/pentaho/pentaho-enterprise-console/license-installer/install_license.sh install ${work}/Pentaho\ Reporting\ Enterprise\ Edition.lic -q
+
+fi
+
+if [ ${ssl} -eq 1 ]; then
+
+  ${logger} "configuring ssl"
+
+  if [ "${provider}" = "rackspace" ]; then
+  
+    # Rackspace does not supply public hostnames so an SSL cert using IP address must be created;
+    # however, Java will complain about common names (CN) that are IP addresses unless subjectAltName is present;
+    # from sun.security.util.HostnameChecker:
+    #   From RFC2818:
+    #   In some cases, the URI is specified as an IP address rather than a
+    #   hostname. In this case, the iPAddress subjectAltName must be present
+    #   in the certificate and must exactly match the IP in the URI.
+    #
+    # keytool does not allow the setting of subjectAltName so openssl is used
+
+    # generate private key in PEM format
+    openssl genrsa -out ${work}/pentaho_private_key.pem 2048  
+
+    # prepare an openssl config file for the req call below; modifies copy of default openssl.cnf file
+    cp /usr/lib/ssl/openssl.cnf ${work}
+    sed -e "s|\[ req \]|[ req ]\nreq_extensions = v3_req|" ${work}/openssl.cnf > ${work}/openssl.cnf1
+    mv ${work}/openssl.cnf1 ${work}/openssl.cnf
+    sed -e "s|\[ v3_req \]|[ v3_req ]\nsubjectAltName=IP:${public_ip}|" ${work}/openssl.cnf > ${work}/openssl.cnf1
+    mv ${work}/openssl.cnf1 ${work}/openssl.cnf
+    sed -e "s|x509_extensions\s*=\s*v3_ca|x509_extensions = v3_req|" ${work}/openssl.cnf > ${work}/openssl.cnf1
+    mv ${work}/openssl.cnf1 ${work}/openssl.cnf
+    
+    # generate the certificate
+    openssl req -new -x509 -key ${work}/pentaho_private_key.pem -outform DER -out ${work}/pentaho.der -days 365 -subj "/C=US/O=Pentaho/OU=Cloud/CN=${public_ip}" -config ${work}/openssl.cnf
+
+    # look at the cert using openssl x509 -inform DER -in pentaho.der -text
+
+    # convert key from PEM to DER format
+    openssl pkcs8 -topk8 -nocrypt -in ${work}/pentaho_private_key.pem -inform PEM -out ${work}/pentaho_private_key.der -outform DER
+    
+    # import private key and public certficate (both DER format) into Java keystore
+    java -Dkeystore=/opt/pentaho/.keystore -jar ${dir_abs}/ImportKey.jar ${work}/pentaho_private_key.der ${work}/pentaho.der tomcat
+
+  else
+
+	  ${logger} "creating self-signed certificate for SSL"
+	
+	  # use sudo to create keystore as /opt/pentaho/.keystore
+	  ${sudo} keytool -genkey -dname "cn=${public_hostname},ou=Cloud,o=Pentaho,c=US" -alias tomcat -keyalg RSA -keypass changeit -storepass changeit
+	
+  fi
+
+  ${logger} "exporting certificate (for trust purposes)"
+    
+  # run as root (in order to write to work folder)
+  keytool -export -alias tomcat -file ${work}/tomcat.cer -storepass changeit -keypass changeit -keystore /opt/pentaho/.keystore
+    
+  ${logger} "importing certificate (for trust purposes)"
+    
+  # run as root (in order to write to cacerts)
+  yes | keytool -import -alias tomcat -file ${work}/tomcat.cer -keystore ${java_home}/jre/lib/security/cacerts -storepass changeit -keypass changeit
+      
+fi
+
+# end pentaho ==========================================================================================================
+
+# begin mysql ==========================================================================================================
+
+if [ ${prepare_root_device} -eq 1 ]; then
+  ${logger} "setting mysql root password"
+  
+  # stop db, start without security, set password, stop db, start db regularly
+  ${logger} "stopping mysql"
+  /etc/init.d/mysql stop
+  sleep 10
+  # as a precaution
+  set +e
+  killall -9 -q mysqld
+  set -e
+  /usr/sbin/mysqld --skip-grant-tables --skip-networking &
+  sleep 5
+  echo "USE mysql;UPDATE user SET Password = PASSWORD('${instance_password}') WHERE User = 'root';FLUSH PRIVILEGES;" | mysql -u root
+  /etc/init.d/mysql stop
+  sleep 10
+  # as a precaution
+  set +e
+  killall -9 -q mysqld
+  set -e
+  
+  ${logger} "starting mysql"
+  # regular start
+  /etc/init.d/mysql start
+fi
+
+# end mysql ============================================================================================================
+
+# begin pentaho data ===================================================================================================
+
+if [ ${prepare_root_device} -eq 1 ]; then
+  ${logger} "configuring default Pentaho database tables"
+  
+  # create pentaho tables; do this even though it might not matter if ebs volume already has data
+  mysql --user=root --password=${instance_password} < /opt/pentaho/pentaho-biserver-ee/data/mysql5/create_quartz_mysql.sql
+  mysql --user=root --password=${instance_password} < /opt/pentaho/pentaho-biserver-ee/data/mysql5/create_repository_mysql.sql
+  mysql --user=root --password=${instance_password} < /opt/pentaho/pentaho-biserver-ee/data/mysql5/create_sample_datasource_mysql.sql
+
+  ${logger} "configuring default user accounts for Pentaho BI Server"
+
+  # drop tables since servers have run once (as part of deb install)
+  user_sql="DROP TABLE IF EXISTS GRANTED_AUTHORITIES;DROP TABLE IF EXISTS USERS;DROP TABLE IF EXISTS AUTHORITIES;"
+  user_sql="${user_sql}CREATE TABLE USERS(USERNAME VARCHAR(50) NOT NULL PRIMARY KEY,PASSWORD VARCHAR(50) NOT NULL,ENABLED BOOLEAN NOT NULL, DESCRIPTION VARCHAR(100));"
+  user_sql="${user_sql}CREATE TABLE AUTHORITIES(AUTHORITY VARCHAR(50) NOT NULL PRIMARY KEY,DESCRIPTION VARCHAR(100));" 
+  user_sql="${user_sql}CREATE TABLE GRANTED_AUTHORITIES(USERNAME VARCHAR(50) NOT NULL,AUTHORITY VARCHAR(50) NOT NULL,CONSTRAINT FK_GRANTED_AUTHORITIES_USERS FOREIGN KEY(USERNAME) REFERENCES USERS(USERNAME),CONSTRAINT FK_GRANTED_AUTHORITIES_AUTHORITIES FOREIGN KEY(AUTHORITY) REFERENCES AUTHORITIES(AUTHORITY));"
+  user_sql="${user_sql}INSERT INTO USERS VALUES('joe','${instance_password}',TRUE,NULL);INSERT INTO USERS VALUES('pat','${instance_password}',TRUE,NULL);INSERT INTO USERS VALUES('suzy','${instance_password}',TRUE,NULL);INSERT INTO USERS VALUES('tiffany','${instance_password}',TRUE,NULL);"
+  user_sql="${user_sql}INSERT INTO AUTHORITIES VALUES('Admin','Super User');INSERT INTO AUTHORITIES VALUES('Anonymous','User has not logged in');INSERT INTO AUTHORITIES VALUES('Authenticated','User has logged in');INSERT INTO AUTHORITIES VALUES('ceo','Chief Executive Officer');INSERT INTO AUTHORITIES VALUES('cto','Chief Technology Officer');INSERT INTO AUTHORITIES VALUES('dev','Developer');INSERT INTO AUTHORITIES VALUES('devmgr','Development Manager');INSERT INTO AUTHORITIES VALUES('is','Information Services');"
+  user_sql="${user_sql}INSERT INTO GRANTED_AUTHORITIES VALUES('joe','Admin');INSERT INTO GRANTED_AUTHORITIES VALUES('joe','ceo');INSERT INTO GRANTED_AUTHORITIES VALUES('joe','Authenticated');INSERT INTO GRANTED_AUTHORITIES VALUES('suzy','cto');INSERT INTO GRANTED_AUTHORITIES VALUES('suzy','is');INSERT INTO GRANTED_AUTHORITIES VALUES('suzy','Authenticated');INSERT INTO GRANTED_AUTHORITIES VALUES('pat','dev');INSERT INTO GRANTED_AUTHORITIES VALUES('pat','Authenticated');INSERT INTO GRANTED_AUTHORITIES VALUES('tiffany','dev');INSERT INTO GRANTED_AUTHORITIES VALUES('tiffany','devmgr');INSERT INTO GRANTED_AUTHORITIES VALUES('tiffany','Authenticated');"
+    
+  # setup sample users (with non-default passwords)
+  echo "USE hibernate;${user_sql}" | mysql --user=root --password=${instance_password}
+  
+  ${logger} "configuring default user accounts for Pentaho DI Server"
+
+  echo ${user_sql} > ${work}/h2.sql 
+  java -cp /opt/pentaho/pentaho-diserver-ee/tomcat/lib/h2-1.2.131.jar org.h2.tools.RunScript -url jdbc:h2:/opt/pentaho/pentaho-diserver-ee/pentaho-solutions/system/hibernate/hibernate -user hibuser -password password -script ${work}/h2.sql
+  
+fi
+
+# end pentaho data =====================================================================================================
+
+# begin servers ========================================================================================================
+
+${logger} "launching Pentaho servers"
+	
+/etc/init.d/pentaho-biserver-ee start
+/etc/init.d/pentaho-diserver-ee start
+/etc/init.d/pentaho-enterprise-console start
+
+# end servers ==========================================================================================================
+
+cd $dir_orig
+
+${logger} "end"
+
+# to clear out the current instance's data as if to force a "new run" on reboot
+rm -rf /var/lib/cloud/instance/*
+
