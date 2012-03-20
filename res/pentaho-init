@@ -131,15 +131,37 @@ if [ ${prepare_root_device} -eq 1 ]; then
   # install MySQL
 	apt-get -y install mysql-server
 	
-  # answer the SUN license prompts ahead of time
-	echo "sun-java6-jdk shared/accepted-sun-dlj-v1-1 boolean true" | debconf-set-selections
-	
+  # install Java
+  ARCH=$(uname -m)
+	case $ARCH in
+	x86_64)
+    java_installer=jdk-6u30-linux-x64.bin
+		;;
+	i[3-6]86)
+    java_installer=jdk-6u30-linux-i586.bin
+		;;
+	*)	
+		echo "Unknown architecture: $ARCH"
+		exit
+		;;
+	esac
+
+  pushd /opt
+  
+  ${logger} "downloading 32-bit Java"
+  wget http://download.oracle.com/otn-pub/java/jdk/6u30-b12/${java_installer}
+
+  chmod +x ${java_installer}
+  
   ${logger} "installing Java"
-	
-  # install Sun JDK 6
-	apt-get -y install sun-java6-jdk
-	
-	java_home=/usr/lib/jvm/java-6-sun
+  yes | ./${java_installer}
+
+  ${logger} "setting up Java links"
+  java_home=/opt/jdk1.6.0_30
+  update-alternatives --install /usr/bin/java java ${java_home}/bin/java 3
+  update-alternatives --install /usr/bin/javac javac ${java_home}/bin/javac 3
+
+  popd
 	
   ${logger} "installing python xml libs"
 	
