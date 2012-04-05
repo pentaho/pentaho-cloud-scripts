@@ -147,9 +147,11 @@ if [ ${prepare_root_device} -eq 1 ]; then
 	esac
 
   pushd /opt
+
+  ${logger} "downloading Java"
   
-  ${logger} "downloading 32-bit Java"
-  wget http://download.oracle.com/otn-pub/java/jdk/6u30-b12/${java_installer}
+  # license cookie code borrowed from https://github.com/flexiondotorg/oab-java6
+  wget --header="Cookie: oraclelicensejdk-6u30-oth-JPR=accept-securebackup-cookie;gpw_e24=http://edelivery.oracle.com" http://download.oracle.com/otn-pub/java/jdk/6u30-b12/${java_installer}
 
   chmod +x ${java_installer}
   
@@ -174,22 +176,23 @@ if [ ${prepare_root_device} -eq 1 ]; then
   # end python xml
 	
   # install Pentaho packages
-	
-	pkg_url="changeme"
+
+  # url prefix for packages; no trailing slash
+  pkg_url="changeme"
 	
   ${logger} "downloading Pentaho DI Server"
-  ${curlfile} ${work}/${diserver_deb} ${pkg_url}${diserver_deb}
+  ${curlfile} ${work}/${diserver_deb} ${pkg_url}/${diserver_deb}
   ${logger} "downloading Pentaho BI Server"
-  ${curlfile} ${work}/${biserver_deb} ${pkg_url}${biserver_deb}
+  ${curlfile} ${work}/${biserver_deb} ${pkg_url}/${biserver_deb}
   ${logger} "downloading PEC"
-  ${curlfile} ${work}/${pec_deb} ${pkg_url}${pec_deb}
+  ${curlfile} ${work}/${pec_deb} ${pkg_url}/${pec_deb}
   ${logger} "downloading Pentaho Dashboard Designer plugin"
-  ${curlfile} ${work}/${pdd_deb} ${pkg_url}${pdd_deb}
+  ${curlfile} ${work}/${pdd_deb} ${pkg_url}/${pdd_deb}
   ${logger} "downloading Pentaho Analyzer plugin"
-  ${curlfile} ${work}/${paz_deb} ${pkg_url}${paz_deb}
+  ${curlfile} ${work}/${paz_deb} ${pkg_url}/${paz_deb}
   ${logger} "downloading Pentaho Interactive Reporting plugin"
-  ${curlfile} ${work}/${pir_deb} ${pkg_url}${pir_deb}
-	
+  ${curlfile} ${work}/${pir_deb} ${pkg_url}/${pir_deb}
+
   ${logger} "installing Pentaho DI Server"
 	dpkg -i ${work}/${diserver_deb}
   ${logger} "installing Pentaho BI Server"
